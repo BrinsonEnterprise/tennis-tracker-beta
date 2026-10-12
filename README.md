@@ -18,6 +18,7 @@ The phone is still the working copy. The cloud holds backups and is where you an
 |---|---|
 | `welcome.html` | **The link you share with testers** |
 | `index.html` | The app: the original plus 4 small hooks (PWA head tags, a call after each local save, a narrow bridge `window.__tennisBeta`, and loading the beta scripts) |
+| `reset.html` | Page the "Forgot password" email opens, to set a new password |
 | `privacy.html` | Beta terms and privacy notice (**draft; have a lawyer review it**) |
 | `beta-config.js` | **The only file you must edit**: Supabase URL and anon key |
 | `beta-cloud.js` / `.css` | Sign-in, backup engine, restore, feedback, error reporting, account deletion |
@@ -34,15 +35,10 @@ The phone is still the working copy. The cloud holds backups and is where you an
    - **The project pauses after about a week with no activity.** Restore it from the dashboard. Active testers keep it awake.
    - **500 MB database.** Each tester is capped at 50 MB of backups, and most use far less. Check usage under **Project Settings → Usage**, and upgrade to Pro ($25/mo) when you pass about 300 MB or about 20 active testers.
 2. **SQL Editor** → paste `supabase/001_beta_schema.sql` → **Run**. It's safe to re-run whenever you update it.
-3. **Authentication → Sign In / Providers → Email**: enabled. Leave "Confirm email" on, and keep **"Allow new users to sign up" ON** (open beta).
-4. **Authentication → Email Templates**: in **both Magic Link and Confirm signup**, make the email show the code:
-   ```html
-   <h2>Your Tennis Tracker sign-in code</h2>
-   <p style="font-size:28px;letter-spacing:4px"><strong>{{ .Token }}</strong></p>
-   <p>Enter this code in the app. It expires shortly.</p>
-   ```
-   *Why a code instead of a link:* on iPhone, an app installed to the home screen keeps its storage separate from Safari. A magic link opens in Safari and signs in the wrong place.
-5. **Custom email sending (required for an open beta, even on the Free plan):** Supabase's built-in email is for testing only and has a very low hourly limit. Set up **Authentication → SMTP Settings** with Resend, Postmark or SendGrid (free tiers exist). Use a sender address on a domain you own, and set up that provider's SPF/DKIM records so codes don't land in spam. Then raise the email rate limit under **Authentication → Rate Limits** to match the plan you chose.
+3. **Authentication → Sign In / Providers → Email**: keep it enabled, **turn OFF "Confirm email"**, set **minimum password length to 8**, and keep **"Allow new users to sign up" ON**.
+   Testers sign in with **email + password**, and the app sends no emails for normal sign-in. That avoids the Free plan's email limits and its block on editing templates (new free projects can't edit email templates without custom SMTP, since June 2026).
+4. **Authentication → URL Configuration**: set **Site URL** to your GitHub Pages address (e.g. `https://<you>.github.io/tennis-tracker-beta/`) and add `https://<you>.github.io/tennis-tracker-beta/**` under **Redirect URLs**. The "Forgot password" email links to `reset.html` on that site.
+5. **Email sending (optional for now):** only password-reset emails are sent, through Supabase's built-in email, which has a low hourly limit. For a bigger beta, add a free SMTP provider (Brevo, Resend, or Gmail with an app password) under **Authentication → SMTP Settings**.
 6. **Project Settings → API**: copy the **Project URL** and the **anon / publishable** key into `beta-config.js`. Never use the `service_role` key.
 
 ### 2. Host it (10 min)
@@ -64,7 +60,7 @@ A public repo is fine: there are no secrets in it, because the anon key is publi
 
 ### 3. Smoke test on your phone (10 min)
 1. Open the welcome link in **Safari** (iPhone) or **Chrome** (Android) and follow its install steps.
-2. Open the app from the home-screen icon, tap **☁** (bottom-left) and sign in with the emailed code.
+2. Open the app from the home-screen icon, tap **☁** (bottom-left) and create an account with email + password.
 3. Track a few points, then tap **Back up now**. In Supabase → Table Editor → `beta_backups`, you should see a row.
 4. Turn on airplane mode, close and reopen the app. It should still load, with your data.
 5. Sign in with a second email on another phone. You should see none of the first account's data.

@@ -1,5 +1,5 @@
 // Offline support. Bump CACHE_VERSION on every deploy so phones pick up the new build.
-const CACHE_VERSION = "tst-beta-2026-10-12-2";
+const CACHE_VERSION = "tst-beta-2026-10-12-4";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -10,6 +10,7 @@ const APP_SHELL = [
   "./vendor/qrcode.js",
   "./welcome.html",
   "./privacy.html",
+  "./reset.html",
   "./manifest.webmanifest",
   "./icons/icon-192.png",
   "./icons/icon-512.png",

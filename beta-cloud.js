@@ -14,8 +14,7 @@
 
   const KEYS = Object.freeze({
     meta: "tst-beta-cloud-meta",
-    auth: "tst-beta-auth",
-    signup: "tst-beta-pending-signup"
+    auth: "tst-beta-auth"
   });
   const TIMING = Object.freeze({
     debounceMs: 30000,
@@ -275,25 +274,46 @@
   // ---------------------------------------------------------------------------
   // Auth
   // ---------------------------------------------------------------------------
-  async function sendCode(email, role) {
-    const { error } = await client.auth.signInWithOtp({ email, options: { shouldCreateUser: true } });
-    if (error) throw error;
-    storage.set(KEYS.signup, JSON.stringify({ email, role, termsVersion: cfg.betaTermsVersion || "beta" }));
+  const MIN_PASSWORD_LENGTH = 8;
+
+  function friendlyAuthError(error) {
+    const msg = errorMessage(error);
+    if (/invalid login credentials/i.test(msg)) return "That email and password don't match. Check them, or tap “Forgot password”.";
+    if (/already registered|already been registered|user already exists/i.test(msg)) return "An account with this email already exists. Tap “I already have an account” to sign in.";
+    if (/email not confirmed/i.test(msg)) return "This account still needs email confirmation. Ask the beta team to turn off “Confirm email” in Supabase.";
+    if (/password should be at least/i.test(msg)) return `Use a password with at least ${MIN_PASSWORD_LENGTH} characters.`;
+    if (/rate limit|too many/i.test(msg)) return "Too many attempts. Wait a few minutes and try again.";
+    return msg;
   }
 
-  async function verifyCode(email, token) {
-    const { data, error } = await client.auth.verifyOtp({ email, token, type: "email" });
-    if (error) throw error;
-    const pending = readJson(KEYS.signup, {});
-    if (pending.email === email && pending.role) {
-      const { error: profileError } = await client.from("beta_profiles").upsert(
-        { role: pending.role, beta_terms_version: pending.termsVersion },
-        { onConflict: "user_id" }
-      );
-      if (profileError) console.warn("[beta-cloud] profile save failed", errorMessage(profileError));
+  async function saveProfile(role) {
+    const { error } = await client.from("beta_profiles").upsert(
+      { role, beta_terms_version: cfg.betaTermsVersion || "beta" },
+      { onConflict: "user_id" }
+    );
+    if (error) console.warn("[beta-cloud] profile save failed", errorMessage(error));
+  }
+
+  async function createAccount(email, password, role) {
+    const { data, error } = await client.auth.signUp({ email, password });
+    if (error) throw new Error(friendlyAuthError(error));
+    if (!data.session) {
+      // Email confirmation is still on in Supabase; the user must confirm before signing in.
+      return { needsConfirmation: true };
     }
-    storage.remove(KEYS.signup);
-    return data.session;
+    await saveProfile(role);
+    return { needsConfirmation: false };
+  }
+
+  async function signIn(email, password) {
+    const { error } = await client.auth.signInWithPassword({ email, password });
+    if (error) throw new Error(friendlyAuthError(error));
+  }
+
+  async function sendPasswordReset(email) {
+    const redirectTo = new URL("reset.html", window.location.href).href;
+    const { error } = await client.auth.resetPasswordForEmail(email, { redirectTo });
+    if (error) throw new Error(friendlyAuthError(error));
   }
 
   async function checkCloudHasData() {
@@ -429,6 +449,7 @@
     else panel.removeAttribute("open");
     ui.message = null;
     ui.restoreTarget = null;
+    ui.authPassword = "";
     updateFabVisibility();
     fab.focus();
   }
@@ -453,56 +474,108 @@
   }
 
   function viewSignedOut() {
-    const pending = readJson(KEYS.signup, {});
-    if (ui.view === "code" && pending.email) {
-      const codeInput = h("input", {
-        id: "betaCode", class: "beta-input", inputmode: "numeric", autocomplete: "one-time-code",
-        pattern: "[0-9]{6,10}", maxlength: "10", required: true, "aria-describedby": "betaCodeHelp"
-      });
+    const mode = ui.authMode || "create";
+    const emailInput = h("input", { id: "betaEmail", class: "beta-input", type: "email", autocomplete: "email", required: true, value: ui.authEmail || "" });
+    const rememberEmail = () => { ui.authEmail = emailInput.value.trim(); };
+    const switchMode = (next) => () => { rememberEmail(); ui.authPassword = ""; ui.authMode = next; setMessage(null); renderPanel(); };
+
+    if (mode === "reset") {
       const form = h("form", {
-        class: "beta-form",
+        class: "beta-form", novalidate: true,
         onsubmit: (event) => {
           event.preventDefault();
-          const token = codeInput.value.replace(/\D/g, "");
-          if (token.length < 6) { setMessage("error", "Enter the code from the email."); renderPanel(); return; }
+          const email = emailInput.value.trim().toLowerCase();
+          if (!emailInput.checkValidity()) { setMessage("error", "Enter a valid email address."); renderPanel(); return; }
+          rememberEmail();
           withBusy(async () => {
-            await verifyCode(pending.email, token);
+            await sendPasswordReset(email);
+            setMessage("success", `If an account exists for ${email}, a reset link is on its way. Open it, choose a new password, then sign in here.`);
+          });
+        }
+      },
+        h("p", {}, "We'll email you a link to choose a new password."),
+        h("label", { for: "betaEmail" }, "Email"),
+        emailInput,
+        h("button", { type: "submit", class: "beta-btn beta-btn-primary", disabled: ui.busy }, ui.busy ? "Sending…" : "Email me a reset link"),
+        button("Back to sign in", switchMode("signin"), "link")
+      );
+      return [form];
+    }
+
+    const isCreate = mode === "create";
+    const passwordInput = h("input", {
+      id: "betaPassword", class: "beta-input", type: "password", required: true, value: ui.authPassword || "",
+      oninput: (event) => { ui.authPassword = event.target.value; },
+      minlength: String(MIN_PASSWORD_LENGTH), autocomplete: isCreate ? "new-password" : "current-password",
+      "aria-describedby": isCreate ? "betaPasswordHelp" : null
+    });
+    const showPassword = h("input", { id: "betaShowPassword", type: "checkbox", onchange: (event) => { passwordInput.type = event.target.checked ? "text" : "password"; } });
+
+    if (!isCreate) {
+      const form = h("form", {
+        class: "beta-form", novalidate: true,
+        onsubmit: (event) => {
+          event.preventDefault();
+          const email = emailInput.value.trim().toLowerCase();
+          if (!emailInput.checkValidity()) { setMessage("error", "Enter a valid email address."); renderPanel(); return; }
+          if (!passwordInput.value) { setMessage("error", "Enter your password."); renderPanel(); return; }
+          rememberEmail();
+          withBusy(async () => {
+            await signIn(email, passwordInput.value);
+            ui.authPassword = "";
             setMessage("success", "Signed in. Backups are on.");
             ui.view = "home";
           });
         }
       },
-        h("label", { for: "betaCode" }, "Sign-in code"),
-        codeInput,
-        h("p", { id: "betaCodeHelp", class: "beta-help" }, `We emailed a code to ${pending.email}. It can take a minute; check spam.`),
-        h("button", { type: "submit", class: "beta-btn beta-btn-primary", disabled: ui.busy }, ui.busy ? "Checking…" : "Sign in"),
-        button("Use a different email", () => { storage.remove(KEYS.signup); ui.view = "home"; setMessage(null); renderPanel(); }, "link")
+        h("p", {}, "Sign in to back up this device and restore your data on a new phone."),
+        h("label", { for: "betaEmail" }, "Email"),
+        emailInput,
+        h("label", { for: "betaPassword" }, "Password"),
+        passwordInput,
+        h("div", { class: "beta-check" }, showPassword, h("label", { for: "betaShowPassword" }, "Show password")),
+        h("button", { type: "submit", class: "beta-btn beta-btn-primary", disabled: ui.busy }, ui.busy ? "Signing in…" : "Sign in"),
+        button("Forgot password?", switchMode("reset"), "link"),
+        button("Create a new account", switchMode("create"), "link")
       );
       return [form];
     }
 
-    const emailInput = h("input", { id: "betaEmail", class: "beta-input", type: "email", autocomplete: "email", required: true, value: pending.email || "" });
-    const roleSelect = h("select", { id: "betaRole", class: "beta-input", required: true },
-      Object.entries(ROLE_LABELS).map(([value, label]) => h("option", { value, selected: value === (pending.role || "parent") }, label))
+    const roleSelect = h("select", { id: "betaRole", class: "beta-input", required: true, onchange: (event) => { ui.authRole = event.target.value; } },
+      Object.entries(ROLE_LABELS).map(([value, label]) => h("option", { value, selected: value === (ui.authRole || "parent") }, label))
     );
-    const consent = h("input", { id: "betaConsent", type: "checkbox", required: true });
+    const consent = h("input", { id: "betaConsent", type: "checkbox", required: true, checked: Boolean(ui.authConsent),
+      onchange: (event) => { ui.authConsent = event.target.checked; } });
     const form = h("form", {
-      class: "beta-form",
+      class: "beta-form", novalidate: true,
       onsubmit: (event) => {
         event.preventDefault();
         const email = emailInput.value.trim().toLowerCase();
+        rememberEmail();
+        ui.authRole = roleSelect.value;
         if (!emailInput.checkValidity()) { setMessage("error", "Enter a valid email address."); renderPanel(); return; }
+        if (passwordInput.value.length < MIN_PASSWORD_LENGTH) { setMessage("error", `Use a password with at least ${MIN_PASSWORD_LENGTH} characters.`); renderPanel(); return; }
         if (!consent.checked) { setMessage("error", "Please confirm the beta terms to continue."); renderPanel(); return; }
         withBusy(async () => {
-          await sendCode(email, roleSelect.value);
-          setMessage("info", null);
-          ui.view = "code";
+          const result = await createAccount(email, passwordInput.value, roleSelect.value);
+          ui.authPassword = "";
+          if (result.needsConfirmation) {
+            ui.authMode = "signin";
+            setMessage("info", "Account created. Check your email to confirm it, then sign in.");
+          } else {
+            setMessage("success", "Account created. Backups are on.");
+            ui.view = "home";
+          }
         });
       }
     },
-      h("p", {}, "Sign in to back up this device to the cloud and restore it if your phone is lost or cleared. Everything still works offline."),
+      h("p", {}, "Create a free account to back up this device to the cloud and restore it if your phone is lost or cleared. Everything still works offline."),
       h("label", { for: "betaEmail" }, "Email"),
       emailInput,
+      h("label", { for: "betaPassword" }, "Choose a password"),
+      passwordInput,
+      h("p", { id: "betaPasswordHelp", class: "beta-help" }, `At least ${MIN_PASSWORD_LENGTH} characters.`),
+      h("div", { class: "beta-check" }, showPassword, h("label", { for: "betaShowPassword" }, "Show password")),
       h("label", { for: "betaRole" }, "I'm a"),
       roleSelect,
       h("div", { class: "beta-check" },
@@ -512,7 +585,8 @@
           h("a", { href: "privacy.html", target: "_blank", rel: "noopener" }, "beta terms & privacy notice"),
           ". The app is provided as-is and used at my own risk. If I track a minor who isn't my child, I have their parent or guardian's permission.")
       ),
-      h("button", { type: "submit", class: "beta-btn beta-btn-primary", disabled: ui.busy }, ui.busy ? "Sending…" : "Email me a sign-in code")
+      h("button", { type: "submit", class: "beta-btn beta-btn-primary", disabled: ui.busy }, ui.busy ? "Creating account…" : "Create account"),
+      button("I already have an account", switchMode("signin"), "link")
     );
     return [form];
   }
@@ -544,6 +618,7 @@
           if (sync.dirty) await runBackup("manual");
           const { error } = await client.auth.signOut();
           if (error) throw error;
+          ui.authMode = "signin";
           setMessage("info", "Signed out. Your data stays on this device.");
         }), "link"),
         button("Delete my cloud account & data…", () => { ui.view = "delete"; setMessage(null); renderPanel(); }, "link")
@@ -566,6 +641,7 @@
           meta.lastError = null;
           saveMeta();
           ui.view = "home";
+          ui.authMode = "create";
           setMessage("success", "Your cloud account and data were deleted.");
         }), "danger"),
         button("Cancel", () => { ui.view = "home"; renderPanel(); }, "secondary")
@@ -617,7 +693,7 @@
     const textarea = h("textarea", { id: "betaFeedback", class: "beta-input", rows: "5", maxlength: "4000", required: true });
     return [
       h("form", {
-        class: "beta-form",
+        class: "beta-form", novalidate: true,
         onsubmit: (event) => {
           event.preventDefault();
           const message = textarea.value.trim();
